@@ -1,0 +1,92 @@
+import paho.mqtt.client as mqtt
+import matplotlib.pyplot as plt
+from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
+import numpy as np
+import threading
+from matplotlib.animation import FuncAnimation
+
+# Global variables
+x_data, y_data = [], []
+first_data_received = False
+
+def initialize_ukf():
+    global ukf
+    dt = 1  # Update rate of 1 Hz
+
+    # Define sigma points and state transition and measurement functions
+    sigma_points = MerweScaledSigmaPoints(n=4, alpha=0.1, beta=2., kappa=0)
+    fx = lambda x, dt: np.array([x[0] + x[2] * dt, x[1] + x[3] * dt, x[2], x[3]])
+    hx = lambda x: np.array([x[0], x[1]])
+
+    # Initialize UKF
+    ukf = UnscentedKalmanFilter(dim_x=4, dim_z=2, dt=dt, hx=hx, fx=fx, points=sigma_points)
+    
+    # Initial state and covariance
+    ukf.x = np.zeros(4)  # [x, y, v_x, v_y]
+    ukf.P *= 1000        # Initial covariance
+    ukf.R = np.eye(2) * 0.5  # Measurement noise covariance
+    ukf.Q = np.eye(4) * 0.5  # Process noise covariance
+
+initialize_ukf()
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to MQTT broker")
+    client.subscribe("bar/bar")
+
+def on_message(client, userdata, msg):
+    global first_data_received
+    
+    payload = msg.payload.decode()
+    print(f"Received message: {payload}")
+
+    if payload.startswith("Acc:"):
+        ax, ay = map(float, payload.split("Acc:")[1].strip().split(", ")[:2])
+        
+        # UKF updates
+        ukf.predict()
+        ukf.update(np.array([ax, ay]))
+
+        pos_x, pos_y = ukf.x[0], ukf.x[1]
+
+        if not first_data_received:
+            x_data.append(pos_x)
+            y_data.append(pos_y)
+            first_data_received = True
+        else:
+            x_data.append(pos_x)
+            y_data.append(pos_y)
+
+def animate(i):
+    if x_data and y_data:
+        line.set_data(x_data[:-1], y_data[:-1])
+        latest_point.set_data([x_data[-1]], [y_data[-1]])
+        ax.relim()
+        ax.autoscale_view()
+    return line, latest_point
+
+# MQTT client setup
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
+client.connect("localhost", 1883, 60)
+mqtt_thread = threading.Thread(target=client.loop_forever)
+mqtt_thread.start()
+
+# Plot setup
+fig, ax = plt.subplots()
+line, = ax.plot([], [], '-o', c='b', label='Path')
+latest_point, = ax.plot([], [], 'ro', label='Latest Point')
+ax.set_xlabel('X Distance (m)')
+ax.set_ylabel('Y Distance (m)')
+ax.set_title('Real-time Position Tracking')
+ax.grid(True)
+ax.legend()
+
+ani = FuncAnimation(fig, animate, interval=1000, blit=True)
+
+try:
+    plt.show()
+except KeyboardInterrupt:
+    client.loop_stop()
+    plt.close()
